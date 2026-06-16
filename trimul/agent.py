@@ -331,6 +331,8 @@ def main():
     # Benchmark baseline before the loop
     if baseline_path:
         venv_python = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+        if not os.path.exists(venv_python):
+            venv_python = shutil.which("python3") or sys.executable
         print(f"Benchmarking baseline '{baseline_name}'...", flush=True)
         ret = os.system(f"cd {PROJECT_DIR} && {venv_python} run_eval.py submission.py -o results.json 2>&1")
         try:
