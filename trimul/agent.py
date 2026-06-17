@@ -277,7 +277,7 @@ def main():
 
     load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
-    default_model = os.environ.get("AUTORESEARCH_MODEL", "claude-sonnet-4-6")
+    default_model = os.environ.get("AUTORESEARCH_MODEL", "claude-opus-4-8")
     advisor_model = args.advisor_model or default_model
     worker_model = args.worker_model or default_model
 

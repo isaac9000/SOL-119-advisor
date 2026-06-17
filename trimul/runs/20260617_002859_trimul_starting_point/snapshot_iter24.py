@@ -1,17 +1,9 @@
 """
-TriMul submission — finalized cuBLAS-bmm pipeline (honest best ~5882 us, 1.85x
-over the 10877 us baseline; reproduced across four independent runs).
+TriMul submission — low-overhead functional PyTorch baseline.
 
-Architecture:
-  * Pre-stage (torch.compile, dynamic): LayerNorm + 5 projections + sigmoid gates
-    + mask, emitting gated/masked left/right in a contiguous-K (B*H, N, N) fp16
-    layout (permute b,n,n,h -> b,h,n,n then reshape + .contiguous()).
-  * Contraction: cuBLAS torch.bmm(left, right^T) on that layout, fp16 output —
-    at the achievable compute/bandwidth ceiling for these shapes.
-  * Post-stage (torch.compile, dynamic): LayerNorm-over-H + out-gate + out-proj.
-
-Operates directly on the provided weight tensors with functional ops; eliminates
-per-call module construction/parameter re-wrapping.
+Eliminates per-call module construction and parameter re-wrapping. Operates
+directly on the provided weight tensors with functional ops, avoids redundant
+dtype casts, and expresses the contraction as a single batched matmul.
 """
 
 import torch
@@ -37,10 +29,8 @@ def _pre_stage(x, mask, dim,
     out_gate = torch.sigmoid(F.linear(x, og_w))
     m = mask.unsqueeze(-1)
     bs, n, _, h = left.shape
-    # Produce contiguous-K (B*H, N, N) fp16 layout for the cuBLAS bmm contraction:
-    # permute (b,n,n,h)->(b,h,n,n) so the contraction axis k becomes innermost
-    # (load-bearing: the explicit .contiguous() enables cuBLAS's fast tensor-core
-    # path; strided operands fall back to a slow path, see #20/#22).
+    # Produce contiguous-K (B*H, N, N) fp16 layout for the contraction kernel:
+    # permute (b,n,n,h)->(b,h,n,n) so the contraction axis k becomes innermost.
     left = (left * m * left_gate).permute(0, 3, 1, 2).reshape(bs * h, n, n).to(torch.float16).contiguous()
     right = (right * m * right_gate).permute(0, 3, 1, 2).reshape(bs * h, n, n).to(torch.float16).contiguous()
     return left, right, out_gate, bs, n, h
