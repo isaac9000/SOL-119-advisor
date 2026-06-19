@@ -1,12 +1,11 @@
 """
-Optimized attention-backward kernel — proven best configuration (#18):
+Optimized attention-backward kernel:
 - Both matmuls use group-reshape [bs*8, 10*sq, ...] — no GQA expansion anywhere.
-- dP and dV bmms launched concurrently on separate CUDA streams.
-- Module-level cached side stream and event.
-- Pre-allocated output tensors before stream switching (using out= parameter).
-- dV: direct attn.T @ dO -> [bs*8, skv, 128] (no post-transpose copy needed).
-- Triton softmax-backward with row batching (proven optimal ROWS_PER_BLOCK).
-- All matmuls in bfloat16 (tensor cores).
+- torch.bmm for both dP and dV.
+- dV: clean attn_groups_flat.T @ dO_groups_flat (no extra .contiguous() on result).
+- Triton softmax-backward with increased ROWS_PER_BLOCK for mid-range seq_kv.
+- Removed unnecessary is_contiguous() checks for input tensors.
+- All in bfloat16. Sequential execution.
 
 custom_kernel(data) receives:
     data = (grad_attn_output, attn_weights, attn_weights_dropped,
@@ -32,18 +31,6 @@ NUM_ATTENTION_HEADS = 80
 NUM_KEY_VALUE_HEADS = 8
 HEAD_DIM = 128
 
-# Module-level cached CUDA side stream and event (created once, reused every call)
-_side_stream = None
-_dO_ready_event = None
-
-
-def _get_side_stream(device):
-    global _side_stream, _dO_ready_event
-    if _side_stream is None:
-        _side_stream = torch.cuda.Stream(device)
-        _dO_ready_event = torch.cuda.Event()
-    return _side_stream, _dO_ready_event
-
 
 @triton.jit
 def fused_softmax_bwd_batched(
@@ -59,8 +46,6 @@ def fused_softmax_bwd_batched(
 ):
     """
     Batched softmax-backward kernel: each program handles ROWS_PER_BLOCK rows.
-    For seq_kv <= BLOCK_SKV: single-pass (load once, compute row_sum, write).
-    For seq_kv > BLOCK_SKV: two-pass (accumulate row_sum, then write).
     Grid: ceil(total_rows / ROWS_PER_BLOCK)
     """
     block_id = tl.program_id(0)
@@ -72,7 +57,6 @@ def fused_softmax_bwd_batched(
             base = row_id * seq_kv
 
             if BLOCK_SKV >= seq_kv:
-                # Single-pass: all elements fit in one block
                 offsets = tl.arange(0, BLOCK_SKV)
                 mask_bounds = offsets < seq_kv
 
@@ -89,7 +73,6 @@ def fused_softmax_bwd_batched(
 
                 tl.store(dS_ptr + base + offsets, ds.to(tl.bfloat16), mask=mask_bounds)
             else:
-                # Two-pass for large seq_kv
                 row_sum = tl.zeros([1], dtype=tl.float32)
                 for block_start in range(0, seq_kv, BLOCK_SKV):
                     offsets = block_start + tl.arange(0, BLOCK_SKV)
@@ -131,8 +114,7 @@ def custom_kernel(data):
     device = grad_attn_output.device
 
     # =========================================================================
-    # Step 1: Transpose dO: [bs, sq, 80, 128] -> [bs, 80, sq, 128] (bfloat16).
-    # One contiguous() call; all subsequent reshapes are free views.
+    # Step 1: Make dO contiguous in [bs, 80, sq, 128] layout (bfloat16).
     # =========================================================================
     dO = grad_attn_output.permute(0, 2, 1, 3).contiguous()
     # dO: [bs, 80, sq, 128], bfloat16, contiguous
@@ -140,78 +122,45 @@ def custom_kernel(data):
     # Shared group-reshape for both matmuls: [bs*8, 10*sq, 128] — free view
     dO_groups_flat = dO.reshape(bs * n_kv_heads, n_groups * seq_q, HEAD_DIM)
 
-    # Prepare matmul operands — all free views (no copies)
+    # =========================================================================
+    # Step 2: Compute dP = dO @ V^T without GQA expansion.
+    # torch.bmm([bs*8, 10*sq, 128], [bs*8, 128, skv]) -> [bs*8, 10*sq, skv]
+    # =========================================================================
     vs_flat = value_states.reshape(bs * n_kv_heads, seq_kv, HEAD_DIM)
-    attn_groups_flat = attn_weights_dropped.reshape(bs * n_kv_heads, n_groups * seq_q, seq_kv)
-
-    # =========================================================================
-    # Pre-allocate output tensors on the CURRENT stream before any switching.
-    # Using out= parameter in bmm prevents allocator interference between streams.
-    # =========================================================================
-    # dP: [bs*8, 10*sq, skv]
-    dP_groups = torch.empty(
-        (bs * n_kv_heads, n_groups * seq_q, seq_kv),
-        dtype=torch.bfloat16, device=device
-    )
-    # dV: [bs*8, skv, 128] — final layout directly, no post-transpose needed
-    dV_flat = torch.empty(
-        (bs * n_kv_heads, seq_kv, HEAD_DIM),
-        dtype=torch.bfloat16, device=device
-    )
-
-    # =========================================================================
-    # Step 2: Launch dP and dV bmms concurrently on separate CUDA streams.
-    # Both read from dO_groups_flat (safe concurrent reads).
-    # dV on side stream, dP on main stream.
-    # =========================================================================
-    main_stream = torch.cuda.current_stream(device)
-    side_stream, dO_ready_event = _get_side_stream(device)
-
-    # Signal that dO is ready on main stream
-    dO_ready_event.record(main_stream)
-
-    # Side stream waits for dO, then launches dV
-    side_stream.wait_event(dO_ready_event)
-    with torch.cuda.stream(side_stream):
-        # [bs*8, skv, 10*sq] @ [bs*8, 10*sq, 128] -> [bs*8, skv, 128]
-        # attn_groups_flat.transpose(-2,-1) is non-contiguous: cuBLAS TN GEMM
-        # Result dV_flat is contiguous [bs*8, skv, 128] — no post-copy needed
-        torch.bmm(attn_groups_flat.transpose(-2, -1), dO_groups_flat, out=dV_flat)
-
-    # Launch dP on main stream (runs concurrently with dV on side stream)
-    # [bs*8, 10*sq, 128] @ [bs*8, 128, skv] -> [bs*8, 10*sq, skv]
-    torch.bmm(dO_groups_flat, vs_flat.transpose(-2, -1), out=dP_groups)
+    dP_groups = torch.bmm(dO_groups_flat, vs_flat.transpose(-2, -1))
 
     # =========================================================================
     # Step 3: Fused softmax backward + dropout correction via Triton.
-    # Main stream only — dP is ready (in-order), overlaps with dV on side stream.
     # =========================================================================
     scale = 1.0 / (1.0 - attention_dropout) if attention_dropout > 0.0 else 1.0
 
     total_rows = bs * n_heads * seq_q
 
+    # Flatten to [total_rows, seq_kv] — free views (all contiguous)
     dP_dropped_flat = dP_groups.reshape(total_rows, seq_kv)
+    # Input tensors are guaranteed contiguous — skip is_contiguous() checks
     P_flat  = attn_weights.reshape(total_rows, seq_kv)
     dm_flat = dropout_mask.reshape(total_rows, seq_kv)
 
     dS_flat = torch.empty((total_rows, seq_kv), dtype=torch.bfloat16, device=device)
 
-    # Proven optimal ROWS_PER_BLOCK: balance between parallelism and register pressure
+    # Choose BLOCK_SKV and ROWS_PER_BLOCK based on seq_kv.
+    # Increased ROWS_PER_BLOCK for mid-range seq_kv to improve SM occupancy.
     if seq_kv <= 128:
         BLOCK_SKV = 128
         ROWS_PER_BLOCK = 16
     elif seq_kv <= 256:
         BLOCK_SKV = 256
-        ROWS_PER_BLOCK = 8
+        ROWS_PER_BLOCK = 16   # increased from 8
     elif seq_kv <= 512:
         BLOCK_SKV = 512
-        ROWS_PER_BLOCK = 4
+        ROWS_PER_BLOCK = 8    # increased from 4
     elif seq_kv <= 1024:
         BLOCK_SKV = 1024
-        ROWS_PER_BLOCK = 2
+        ROWS_PER_BLOCK = 4    # increased from 2
     elif seq_kv <= 2048:
         BLOCK_SKV = 2048
-        ROWS_PER_BLOCK = 1
+        ROWS_PER_BLOCK = 2    # increased from 1
     else:
         BLOCK_SKV = 2048
         ROWS_PER_BLOCK = 1
@@ -229,10 +178,18 @@ def custom_kernel(data):
 
     dS = dS_flat.reshape(bs, n_heads, seq_q, seq_kv)
 
-    # Wait for side stream (dV) to complete — dV_flat is already in final layout
-    main_stream.wait_stream(side_stream)
+    # =========================================================================
+    # Step 4: Compute dV without GQA expansion.
+    # Clean formulation: attn.T @ dO — cuBLAS handles NT GEMM efficiently.
+    # attn_groups_flat: [bs*8, 10*sq, skv]
+    # attn_groups_flat.T: [bs*8, skv, 10*sq] (non-contiguous, cuBLAS NT path)
+    # dO_groups_flat: [bs*8, 10*sq, 128]
+    # Result: [bs*8, skv, 128] — contiguous output, no extra .contiguous() needed.
+    # =========================================================================
+    attn_groups_flat = attn_weights_dropped.reshape(bs * n_kv_heads, n_groups * seq_q, seq_kv)
 
-    # dV_flat is [bs*8, skv, 128] contiguous — free reshape to final shape
+    # torch.bmm with non-contiguous first arg (transposed view) — cuBLAS NT GEMM
+    dV_flat = torch.bmm(attn_groups_flat.transpose(-2, -1), dO_groups_flat)
     dV = dV_flat.reshape(bs, n_kv_heads, seq_kv, HEAD_DIM)
 
     return dS, dV

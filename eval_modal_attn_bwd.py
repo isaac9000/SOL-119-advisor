@@ -58,7 +58,7 @@ ATTENTION_DROPOUT = 0.1
 # Update the tag if a newer image is available.
 image = (
     modal.Image.from_registry(
-        "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel",
+        "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel",
         add_python="3.11",
     )
     .pip_install("triton")
