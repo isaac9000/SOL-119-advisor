@@ -1,23 +1,23 @@
-"""Shared state and tool implementations for the attn_bwd optimization loop."""
+"""Shared state and tool implementations for the moe_bwd optimization loop."""
 
 import os
 from datetime import datetime, timezone
 
 HISTORY_FILE = "experiment_history.md"
-TSV_FILE = "results.tsv"
-PLOT_FILE = "progress.png"
+TSV_FILE     = "results.tsv"
+PLOT_FILE    = "progress.png"
 
-_run_directory = None
-_current_agent_iteration = 0
-_llm_call_count = 0
+_run_directory            = None
+_current_agent_iteration  = 0
+_llm_call_count           = 0
 
 
 def set_run_directory(run_dir):
     global _run_directory, HISTORY_FILE, TSV_FILE, PLOT_FILE
     _run_directory = run_dir
-    HISTORY_FILE = os.path.join(run_dir, "experiment_history.md")
-    TSV_FILE = os.path.join(run_dir, "results.tsv")
-    PLOT_FILE = os.path.join(run_dir, "progress.png")
+    HISTORY_FILE   = os.path.join(run_dir, "experiment_history.md")
+    TSV_FILE       = os.path.join(run_dir, "results.tsv")
+    PLOT_FILE      = os.path.join(run_dir, "progress.png")
 
 
 def set_agent_iteration(n: int):
@@ -66,10 +66,10 @@ def _parse_tsv():
             continue
         try:
             rows.append({
-                "experiment": int(parts[0]),
+                "experiment":      int(parts[0]),
                 "agent_iteration": int(parts[1]) if parts[1].isdigit() else 0,
-                "time_us": float(parts[3]),
-                "status": parts[4],
+                "time_us":         float(parts[3]),
+                "status":          parts[4],
             })
         except (ValueError, IndexError):
             continue
@@ -99,14 +99,14 @@ def _update_plot():
 
     fig, ax = plt.subplots(figsize=(14, 6))
 
-    keep_x    = [i for i, s, t in zip(iterations, statuses, times) if s == "keep" and t]
-    keep_y    = [-t for s, t in zip(statuses, times) if s == "keep" and t]
+    keep_x    = [i for i, s, t in zip(iterations, statuses, times) if s == "keep"    and t]
+    keep_y    = [-t for s, t in zip(statuses, times)               if s == "keep"    and t]
     discard_x = [i for i, s, t in zip(iterations, statuses, times) if s == "discard" and t]
-    discard_y = [-t for s, t in zip(statuses, times) if s == "discard" and t]
-    crash_x   = [i for i, s in zip(iterations, statuses) if s == "crash"]
+    discard_y = [-t for s, t in zip(statuses, times)               if s == "discard" and t]
+    crash_x   = [i for i, s in zip(iterations, statuses)           if s == "crash"]
 
     all_valid = [-t for t in times if t and t > 0]
-    y_lo = min(all_valid) * 1.15 if all_valid else -100
+    y_lo = min(all_valid) * 1.15 if all_valid else -20
     y_hi = max(all_valid) * 0.85 if all_valid else 0
 
     if keep_x:
@@ -125,23 +125,23 @@ def _update_plot():
         ax.step(bx, by, where="post", color="#3b82f6", linewidth=2,
                 label="best time", zorder=6)
 
-    # Reference lines
-    ax.axhline(-756, color="#9ca3af", linewidth=1, linestyle="--", alpha=0.6,
-               label="baseline ≈756 µs")
-    ax.axhline(-82,  color="#10b981", linewidth=1, linestyle="--", alpha=0.6,
-               label="SOL ≈82 µs")
+    # Reference lines (in negative-ms space)
+    ax.axhline(-14.23, color="#9ca3af", linewidth=1, linestyle="--", alpha=0.6,
+               label="baseline ≈14.23 ms")
+    ax.axhline(-1.80,  color="#10b981", linewidth=1, linestyle="--", alpha=0.6,
+               label="SOL ≈1.80 ms")
 
     ax.set_ylim(y_lo * 1.05, y_hi)
     ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
     ax.set_xlabel("Iteration #", fontsize=12)
-    ax.set_ylabel("Negative Latency (-μs)", fontsize=12)
-    ax.set_title("GPU MODE attn_bwd — Autoresearch Progress", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Negative Latency (-ms)", fontsize=12)
+    ax.set_title("GPU MODE moe_bwd — Autoresearch Progress", fontsize=14, fontweight="bold")
     ax.legend(loc="upper right", framealpha=0.9)
     ax.grid(True, alpha=0.3)
 
     if all_valid and best_so_far < float("inf"):
         ax.annotate(
-            f"Best: {best_so_far:.2f} μs",
+            f"Best: {best_so_far:.2f} ms",
             xy=(0.02, 0.98), xycoords="axes fraction",
             fontsize=11, fontweight="bold", color="#3b82f6",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
@@ -193,14 +193,14 @@ def _update_iteration_plot():
 
     ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
     ax.set_xlabel("Iteration #", fontsize=12)
-    ax.set_ylabel("Negative Latency (-μs)", fontsize=12)
-    ax.set_title("GPU MODE attn_bwd — Best per Agent Iteration",
+    ax.set_ylabel("Negative Latency (-ms)", fontsize=12)
+    ax.set_title("GPU MODE moe_bwd — Best per Agent Iteration",
                  fontsize=14, fontweight="bold")
     ax.grid(True, alpha=0.3)
 
     best_overall = min(iter_best.values())
     ax.annotate(
-        f"Best: {best_overall:.2f} μs",
+        f"Best: {best_overall:.2f} ms",
         xy=(0.02, 0.98), xycoords="axes fraction",
         fontsize=11, fontweight="bold", color="#3b82f6",
         bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
@@ -226,7 +226,7 @@ def _log_experiment_direct(
 
     iteration = _get_next_iteration()
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    emoji = {"keep": "✅", "discard": "❌", "crash": "💥"}.get(status, "❓")
+    emoji     = {"keep": "✅", "discard": "❌", "crash": "💥"}.get(status, "❓")
 
     with open(HISTORY_FILE, "a") as f:
         f.write(f"---\n\n")
@@ -237,7 +237,7 @@ def _log_experiment_direct(
             if error_message:
                 f.write(f"**Error:**\n```\n{error_message[:2000]}\n```\n\n")
         else:
-            f.write(f"**Result:** {time_us:.2f} μs\n\n")
+            f.write(f"**Result:** {time_us:.2f} ms\n\n")
         f.write(f"**Kernel code:**\n```python\n{kernel_code}\n```\n\n")
 
     desc = hypothesis[:100]
@@ -257,7 +257,7 @@ def _log_experiment_direct(
 
     if status == "crash":
         return f"Logged #{iteration} CRASH: {hypothesis}"
-    return f"Logged #{iteration} {status}: {time_us:.2f} μs — {hypothesis}"
+    return f"Logged #{iteration} {status}: {time_us:.2f} ms — {hypothesis}"
 
 
 def get_experiment_history() -> str:

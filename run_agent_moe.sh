@@ -8,13 +8,13 @@ if [[ -f .env ]]; then
     set -a; source .env; set +a
 fi
 
-echo "=== attn_bwd advisor-worker optimization ==="
+echo "=== moe_bwd advisor-worker optimization ==="
 echo "Deploying evaluator (no-op if already deployed)..."
-uv run modal deploy eval_modal_attn_bwd.py
+uv run modal deploy eval_modal_moe_bwd.py
 
 echo ""
 echo "Launching agent..."
-uv run attn_bwd/agent.py \
-    --baseline attn_bwd/starting_point.py \
+uv run moe_bwd/agent.py \
+    --baseline moe_bwd/starting_point.py \
     --iterations 25 \
     "$@"

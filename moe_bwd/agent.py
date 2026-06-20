@@ -1,14 +1,14 @@
 """
-Advisor-Worker agentic loop for attention-backward kernel optimization.
+Advisor-Worker agentic loop for MoE backward pass kernel optimization.
 
 Direct Anthropic SDK implementation — no LangGraph or deepagents.
 Evaluation runs outside the loop: the orchestrator calls run_eval.py
 after each worker turn and handles all logging.
 
 Usage:
-    uv run attn_bwd/agent.py
-    uv run attn_bwd/agent.py --iterations 20 --baseline attn_bwd/starting_point.py
-    uv run attn_bwd/agent.py --advisor-model claude-opus-4-7 --worker-model claude-sonnet-4-6
+    uv run moe_bwd/agent.py
+    uv run moe_bwd/agent.py --iterations 20 --baseline moe_bwd/starting_point.py
+    uv run moe_bwd/agent.py --advisor-model claude-opus-4-7 --worker-model claude-sonnet-4-6
 """
 
 import argparse
@@ -35,10 +35,10 @@ from tools import (
     set_llm_call_count,
 )
 
-PROJECT_DIR    = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT      = os.path.dirname(PROJECT_DIR)
+PROJECT_DIR     = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT       = os.path.dirname(PROJECT_DIR)
 SUBMISSION_FILE = os.path.join(PROJECT_DIR, "submission.py")
-RESULTS_FILE   = os.path.join(PROJECT_DIR, "results.json")
+RESULTS_FILE    = os.path.join(PROJECT_DIR, "results.json")
 
 
 def load_prompt(filename: str) -> str:
@@ -248,7 +248,7 @@ def run_agent_turn_retrying(
 
 
 def evaluate_submission() -> tuple[float, str]:
-    """Run run_eval.py and return (geomean_us, error_msg). geomean_us=0 on failure."""
+    """Run run_eval.py and return (geomean_ms, error_msg). geomean_ms=0 on failure."""
     print("[evaluator] running run_eval.py...", flush=True)
     try:
         ret = subprocess.run(
@@ -267,10 +267,10 @@ def evaluate_submission() -> tuple[float, str]:
         text = md if isinstance(md, str) else ""
 
         if "> ❌ Testing failed" in text or "> ❌ Benchmarking failed" in text:
-            err_m = re.search(r"## Error:\s*```\s*(.*?)\s*```", text, re.DOTALL)
+            err_m  = re.search(r"## Error:\s*```\s*(.*?)\s*```", text, re.DOTALL)
             detail = err_m.group(1).strip()[:400] if err_m else ""
-            label = ("Correctness check failed" if "> ❌ Testing failed" in text
-                     else "Benchmark correctness failed")
+            label  = ("Correctness check failed" if "> ❌ Testing failed" in text
+                      else "Benchmark correctness failed")
             return 0.0, f"{label}. {detail}".strip()
 
         m = re.search(r"Geometric mean: ⏱ ([\d.]+)", text)
@@ -334,14 +334,14 @@ def read_results_summary() -> str:
 
     summary = f"=== EXPERIMENT SUMMARY ({total} total) ===\n"
     if best_time < float("inf"):
-        summary += f"Best time: {best_time:.2f} μs — {best_desc[:80]}\n"
+        summary += f"Best time: {best_time:.2f} ms — {best_desc[:80]}\n"
     else:
         summary += "Best time: none yet\n"
     summary += f"Keeps: {len(keeps)} | Discards: {discards} | Crashes: {crashes}\n"
     if keeps:
         summary += "Keep history:\n"
         for it, t, d in keeps[-10:]:
-            summary += f"  #{it}: {t:.2f}μs — {d[:60]}\n"
+            summary += f"  #{it}: {t:.2f} ms — {d[:60]}\n"
     return summary
 
 
@@ -394,7 +394,7 @@ def print_final_report(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Advisor-Worker attn_bwd Optimization Agent"
+        description="Advisor-Worker moe_bwd Optimization Agent"
     )
     parser.add_argument("--iterations", "-n", type=int, default=20)
     parser.add_argument("--checkpoint-every", "-c", type=int, default=5)
@@ -405,9 +405,9 @@ def main() -> None:
 
     load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
-    default_model  = os.environ.get("AUTORESEARCH_MODEL", "claude-sonnet-4-6")
-    advisor_model  = args.advisor_model or default_model
-    worker_model   = args.worker_model or default_model
+    default_model = os.environ.get("AUTORESEARCH_MODEL", "claude-sonnet-4-6")
+    advisor_model = args.advisor_model or default_model
+    worker_model  = args.worker_model or default_model
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY not set")
@@ -422,8 +422,8 @@ def main() -> None:
         baseline_name = os.path.splitext(os.path.basename(baseline_path))[0]
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(PROJECT_DIR, "runs",
-                           f"{timestamp}_attn_bwd_{baseline_name}")
+    run_dir   = os.path.join(PROJECT_DIR, "runs",
+                             f"{timestamp}_moe_bwd_{baseline_name}")
     os.makedirs(run_dir, exist_ok=True)
     set_run_directory(run_dir)
 
@@ -440,7 +440,7 @@ def main() -> None:
     advisor_history: list = []
     worker_history: list  = []
 
-    print(f"Starting advisor-worker attn_bwd optimization loop")
+    print(f"Starting advisor-worker moe_bwd optimization loop")
     print(f"  Advisor model:  {advisor_model}")
     print(f"  Worker model:   {worker_model}")
     print(f"  Baseline:       {baseline_name}")
@@ -460,24 +460,24 @@ def main() -> None:
     kickoff_note = ""
     if baseline_path:
         print(f"Benchmarking baseline '{baseline_name}'...", flush=True)
-        time_us, error_msg = evaluate_submission()
+        time_ms, error_msg = evaluate_submission()
         try:
             with open(SUBMISSION_FILE) as f:
                 baseline_code = f.read()
-            status = "keep" if time_us > 0 else "crash"
+            status = "keep" if time_ms > 0 else "crash"
             if status == "keep":
-                current_best = time_us
+                current_best = time_ms
             _log_experiment_direct(
                 kernel_code=baseline_code,
                 hypothesis=f"Baseline '{baseline_name}' — initial benchmark",
-                time_us=time_us,
+                time_us=time_ms,
                 status=status,
                 error_message=error_msg,
             )
-            print(f"Baseline logged: {time_us:.1f} µs ({status})", flush=True)
+            print(f"Baseline logged: {time_ms:.1f} ms ({status})", flush=True)
             kickoff_note = (
                 f"The '{baseline_name}' baseline is already benchmarked and logged as experiment #1 "
-                f"({time_us:.1f} µs). Your job is to beat it. "
+                f"({time_ms:.1f} ms). Your job is to beat it. "
                 if status == "keep"
                 else (
                     f"The '{baseline_name}' baseline CRASHED (logged as experiment #1). "
@@ -559,18 +559,18 @@ def main() -> None:
             set_llm_call_count(total_llm_calls)
 
             # ── EVALUATE ─────────────────────────────────────────────────
-            time_us, error_msg = evaluate_submission()
+            time_ms, error_msg = evaluate_submission()
             try:
                 with open(SUBMISSION_FILE) as f:
                     kernel_code = f.read()
             except Exception:
                 kernel_code = "(could not read submission.py)"
 
-            if time_us == 0.0:
+            if time_ms == 0.0:
                 status = "crash"
-            elif time_us < current_best:
+            elif time_ms < current_best:
                 status = "keep"
-                current_best = time_us
+                current_best = time_ms
             else:
                 status = "discard"
 
@@ -578,11 +578,11 @@ def main() -> None:
             _log_experiment_direct(
                 kernel_code=kernel_code,
                 hypothesis=hypothesis,
-                time_us=time_us,
+                time_us=time_ms,
                 status=status,
                 error_message=error_msg,
             )
-            print(f"[evaluator] {time_us:.2f} µs — {status}", flush=True)
+            print(f"[evaluator] {time_ms:.2f} ms — {status}", flush=True)
 
             if status == "crash":
                 best_path   = os.path.join(run_dir, "best_submission.py")

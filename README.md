@@ -1,58 +1,63 @@
-# Attn-Bwd Autoresearch
+# MoE-Bwd Autoresearch
 
-An advisor-worker agent pair that iteratively optimizes a CUDA kernel for the attention backward pass on NVIDIA B200. Each iteration the **advisor** reviews experiment history and proposes a strategic direction; the **worker** implements exactly one change to `submission.py`, evaluates it on a B200 via Modal, logs the result, and stops. The outer loop drives the next iteration.
+An advisor-worker agent pair that iteratively optimizes a CUDA kernel for the **MoE (Mixture of Experts) backward pass** on NVIDIA B200. Each iteration the **advisor** reviews experiment history and proposes a strategic direction; the **worker** implements exactly one change to `submission.py`, evaluates it on a B200 via Modal, logs the result, and stops. The outer loop drives the next iteration.
 
 ## Task
 
-Implement the fastest possible **attention backward pass** for a GQA transformer layer (NVIDIA SOL-ExecBench kernel #1):
+Implement the fastest possible **MoE backward pass** (NVIDIA SOL-ExecBench):
 
 ```
-dO = grad_attn_output.transpose(1, 2).float()          # [bs, 80, sq, 128]
-dP̃ = dO @ value_states_expanded^T                      # [bs, 80, sq, skv]
-dP = dP̃ * dropout_mask / (1 - p)
-dS = P * (dP - sum(dP * P, dim=-1))                    # softmax backward
-dV_exp = attn_weights_dropped^T @ dO                   # [bs, 80, skv, 128]
-grad_value_states = dV_exp.reshape(bs,8,10,skv,128).sum(dim=2)
-return grad_attn_scores.to(bf16), grad_value_states.to(bf16)
+For expert_idx in 0..255:
+  token_positions = tokens routed to this expert
+  expert_hidden   = hidden_states[token_positions]              # [E, 4096]
+  gate_pre_act    = expert_hidden @ gate_weights[expert_idx]^T  # [E, 2048]
+  up_output       = expert_hidden @ up_weights[expert_idx]^T    # [E, 2048]
+  intermediate    = silu(gate_pre_act) * up_output              # SwiGLU [E, 2048]
+  # backward through down proj, SwiGLU, gate/up projs
+  # accumulate grad_hidden_states, grad_{gate,up,down}_weights, grad_topk_weights
 ```
 
-`custom_kernel` receives a tuple `(grad_attn_output, attn_weights, attn_weights_dropped, value_states, dropout_mask, attention_dropout)` and returns `(grad_attn_scores, grad_value_states)`:
+`custom_kernel` receives a tuple `(grad_output, hidden_states, topk_indices, topk_weights, gate_weights, up_weights, down_weights)` and returns `(grad_hidden_states, grad_topk_weights, grad_gate_weights, grad_up_weights, grad_down_weights)`:
 
-| Argument | Shape | Dtype |
+| Name | Shape | Dtype |
 |---|---|---|
-| `grad_attn_output` | `[bs, seq_q, 80, 128]` | bfloat16 |
-| `attn_weights` | `[bs, 80, seq_q, seq_kv]` | bfloat16 |
-| `attn_weights_dropped` | `[bs, 80, seq_q, seq_kv]` | bfloat16 |
-| `value_states` | `[bs, 8, seq_kv, 128]` | bfloat16 |
-| `dropout_mask` | `[bs, 80, seq_q, seq_kv]` | bool |
-| `attention_dropout` | scalar | float32 |
-| return `grad_attn_scores` | `[bs, 80, seq_q, seq_kv]` | bfloat16 |
-| return `grad_value_states` | `[bs, 8, seq_kv, 128]` | bfloat16 |
+| `grad_output` | `[num_tokens, 4096]` | float32 |
+| `hidden_states` | `[num_tokens, 4096]` | float32 |
+| `topk_indices` | `[num_tokens, 8]` | int64 |
+| `topk_weights` | `[num_tokens, 8]` | float32 |
+| `gate_weights` | `[256, 2048, 4096]` | float32 |
+| `up_weights` | `[256, 2048, 4096]` | float32 |
+| `down_weights` | `[256, 4096, 2048]` | float32 |
+| return `grad_hidden_states` | `[num_tokens, 4096]` | float32 |
+| return `grad_topk_weights` | `[num_tokens, 8]` | float32 |
+| return `grad_gate_weights` | `[256, 2048, 4096]` | float32 |
+| return `grad_up_weights` | `[256, 2048, 4096]` | float32 |
+| return `grad_down_weights` | `[256, 4096, 2048]` | float32 |
 
-Fixed architecture: 80 attention heads, 8 KV heads, 10 groups/KV head, head_dim=128, dropout=0.1.
+Fixed architecture: 256 experts, 8 experts/token, hidden_size=4096, moe_intermediate_size=2048.
 
 **Benchmark cases (16 total) — from NVIDIA SOL-ExecBench:**
 
-| # | bs | seq_q | seq_kv | Baseline (μs) | SOL (μs) |
-|---|-----|-------|--------|---------------|----------|
-| 1 | 4   | 256   | 256    | 89.7          | 20.1     |
-| 2 | 8   | 373   | 449    | 840.8         | 94.2     |
-| 3 | 4   | 1024  | 2048   | 3208.3        | 540.9    |
-| 4 | 64  | 128   | 128    | 1641.4        | 92.3     |
-| 5 | 2   | 256   | 512    | 211.1         | 18.7     |
-| 6 | 32  | 691   | 773    | 9273.8        | 1142.7   |
-| 7 | 8   | 128   | 128    | 256.4         | 11.9     |
-| 8 | 32  | 512   | 512    | 4250.2        | 578.1    |
-| 9 | 4   | 211   | 293    | 266.7         | 18.8     |
-| 10 | 8  | 256   | 256    | 509.0         | 39.8     |
-| 11 | 16 | 128   | 256    | 485.2         | 40.9     |
-| 12 | 1  | 1024  | 1024   | 354.7         | 69.3     |
-| 13 | 16 | 256   | 512    | 1109.1        | 147.0    |
-| 14 | 32 | 128   | 128    | 840.4         | 46.4     |
-| 15 | 1  | 512   | 512    | 133.3         | 18.5     |
-| 16 | 1  | 4096  | 4096   | 4567.9        | 1063.8   |
+| # | num_tokens | Baseline (ms) | SOL (ms) |
+|---|-----------|--------------|---------|
+| 1 | 2080 | 13.60 | 1.71 |
+| 2 | 2112 | 13.65 | 1.71 |
+| 3 | 4096 | 16.47 | 2.73 |
+| 4 | 2048 | 13.59 | 1.71 |
+| 5 | 2144 | 13.66 | 1.71 |
+| 6 | 2176 | 13.61 | 1.71 |
+| 7 | 2208 | 13.69 | 1.71 |
+| 8 | 2560 | 14.09 | 1.72 |
+| 9 | 6144 | 19.16 | 4.10 |
+| 10 | 2240 | 13.73 | 1.71 |
+| 11 | 2272 | 13.79 | 1.71 |
+| 12 | 2304 | 13.93 | 1.71 |
+| 13 | 2336 | 13.78 | 1.71 |
+| 14 | 2368 | 13.94 | 1.72 |
+| 15 | 2400 | 13.99 | 1.72 |
+| 16 | 2432 | 14.00 | 1.72 |
 
-All 16 cases are used for both correctness testing and benchmarking. Correctness tolerance: `rtol=1e-2, atol=1e-2`. Score = `756 / geomean_us` (≈1.0 at baseline, ≈9.3 at SOL).
+All 16 cases used for correctness testing and benchmarking. Correctness tolerance: `rtol=1e-2, atol=1e-2` (hidden/topk), `atol=1e-1` (weight grads). Score = `14.23 / geomean_ms` (≈1.0 at baseline, ≈7.9 at SOL).
 
 ## Setup
 
@@ -63,7 +68,7 @@ uv sync
 uv run modal token set --token-id <token-id> --token-secret <token-secret>
 
 # Deploy the B200 evaluator (once, before any agent runs)
-uv run modal deploy eval_modal_attn_bwd.py
+uv run modal deploy eval_modal_moe_bwd.py
 ```
 
 Create a `.env` file in the repo root:
@@ -78,27 +83,27 @@ AUTORESEARCH_MODEL=claude-sonnet-4-6   # optional, this is the default
 ## Running the agent
 
 ```bash
-bash run_agent.sh
+bash run_agent_moe.sh
 ```
 
 Or directly:
 
 ```bash
-uv run attn_bwd/agent.py --baseline attn_bwd/starting_point.py --iterations 25
+uv run moe_bwd/agent.py --baseline moe_bwd/starting_point.py --iterations 25
 ```
 
 Quick correctness check without a full benchmark:
 
 ```bash
-cd attn_bwd
+cd moe_bwd
 uv run python run_eval.py submission.py -o results.json --mode test
 ```
 
 ## Structure
 
 ```
-eval_modal_attn_bwd.py   — deployable Modal B200 evaluator
-attn_bwd/
+eval_modal_moe_bwd.py    — deployable Modal B200 evaluator
+moe_bwd/
 ├── agent.py             — advisor-worker agentic loop (direct Anthropic SDK)
 ├── advisor_prompt.md    — advisor system prompt: strategy, comparison discipline
 ├── worker_prompt.md     — worker system prompt: task spec, mandatory sequence, rules
@@ -112,7 +117,7 @@ attn_bwd/
 Each run directory contains:
 - `experiment_history.md` — full log of every attempt with code and result
 - `results.tsv` — tab-separated summary for plotting
-- `progress.png` — latency scatter plot updated each experiment; shows keep/discard/crash points, best-time step line, baseline and SOL reference lines, and cumulative LLM call count
+- `progress.png` — latency scatter plot updated each experiment
 - `iterations.png` — best latency per advisor iteration
 - `best_submission.py` — snapshot of the fastest kernel found so far
 - `proposals.md` — advisor proposals for every iteration
