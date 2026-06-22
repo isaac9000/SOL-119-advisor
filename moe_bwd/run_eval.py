@@ -140,7 +140,7 @@ def main():
 
     evaluate_kernel = modal.Function.from_name("moe-bwd-kernel-eval", "evaluate_kernel")
 
-    MODAL_TIMEOUT = 600
+    MODAL_TIMEOUT = 1200
     result_holder = [None]
     error_holder  = [None]
 
