@@ -126,8 +126,6 @@ def _update_plot():
                 label="best time", zorder=6)
 
     # Reference lines (in negative-ms space)
-    ax.axhline(-14.23, color="#9ca3af", linewidth=1, linestyle="--", alpha=0.6,
-               label="baseline ≈14.23 ms")
     ax.axhline(-1.80,  color="#10b981", linewidth=1, linestyle="--", alpha=0.6,
                label="SOL ≈1.80 ms")
 

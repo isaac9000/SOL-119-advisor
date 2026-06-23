@@ -165,25 +165,32 @@ def run_agent_turn(
 
         history.append({"role": "assistant", "content": content_blocks})
 
-        if response.stop_reason == "end_turn":
+        # Always dispatch tool_use blocks — even if stop_reason is "end_turn".
+        # Leaving tool_use without a following tool_result corrupts history and
+        # causes a 400 on the next API call.
+        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+        if tool_use_blocks:
+            tool_results = []
+            for block in tool_use_blocks:
+                result = _dispatch_tool(block.name, block.input)
+                print(f"  [{label}] → {str(result)[:200]}", flush=True)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": str(result),
+                })
+            history.append({"role": "user", "content": tool_results})
+            if response.stop_reason == "end_turn":
+                text = " ".join(
+                    b.text for b in response.content if b.type == "text"
+                ).strip()
+                return text, n_calls
+        elif response.stop_reason == "end_turn":
             text = " ".join(
                 b.text for b in response.content if b.type == "text"
             ).strip()
             return text, n_calls
-
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    result = _dispatch_tool(block.name, block.input)
-                    print(f"  [{label}] → {str(result)[:200]}", flush=True)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": str(result),
-                    })
-            history.append({"role": "user", "content": tool_results})
-        else:
+        elif response.stop_reason != "tool_use":
             break
 
     return "", n_calls

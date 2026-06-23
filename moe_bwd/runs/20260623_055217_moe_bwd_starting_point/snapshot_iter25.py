@@ -1,11 +1,6 @@
 """
 MoE backward pass — vectorized padded-bmm (Exp #23 exact copy, proven 18.51 ms).
 
-Eliminates the Python-level per-expert loop by:
-1. Flattening topk_indices to [T*8] and sorting by expert to group tokens per expert
-2. Using expert-sorted layout for batched GEMMs via torch.bmm with padding
-3. Scattering results back with index_add_ in batch form
-
 custom_kernel(data) receives:
     data = (grad_output, hidden_states, topk_indices, topk_weights,
             gate_weights, up_weights, down_weights)

@@ -1,0 +1,27 @@
+experiment	agent_iteration	commit	time_us	status	description
+1	0	HEAD	314.79	keep	Baseline 'starting_point' — initial benchmark
+2	1	HEAD	85.55	keep	** Complete rewrite of `custom_kernel` with:
+3	2	HEAD	0.00	crash	** Complete rewrite using three Triton kernels:
+4	3	HEAD	0.00	crash	** Complete rewrite with two corrected Triton kernels:
+5	4	HEAD	0.00	crash	**
+6	5	HEAD	122.38	discard	**
+7	6	HEAD	97.92	discard	**
+8	7	HEAD	0.00	crash	**
+9	8	HEAD	97.73	discard	## IMPLEMENTATION
+10	9	HEAD	101.12	discard	**
+11	10	HEAD	0.00	crash	**
+12	11	HEAD	122.76	discard	## IMPLEMENTATION
+13	12	HEAD	0.00	crash	**
+14	13	HEAD	86.17	discard	## IMPLEMENTATION
+15	14	HEAD	0.00	crash	**
+16	15	HEAD	0.00	crash	**
+17	16	HEAD	0.00	crash	**
+18	17	HEAD	0.00	crash	## IMPLEMENTATION
+19	18	HEAD	155.32	discard	**
+20	19	HEAD	113.35	discard	**
+21	20	HEAD	0.00	crash	## IMPLEMENTATION
+22	21	HEAD	0.00	crash	## IMPLEMENTATION
+23	22	HEAD	18.51	keep	** Exact reproduction of the Exp #2 padded-bmm logic:
+24	23	HEAD	48.16	discard	## IMPLEMENTATION
+25	24	HEAD	85.45	discard	** Byte-for-byte reproduction of the Exp #23 code that achieved 18.51 ms:
+26	25	HEAD	18.56	discard	** Byte-for-byte reproduction of the Exp #23 code that achieved 18.51 ms (best result across all 25 

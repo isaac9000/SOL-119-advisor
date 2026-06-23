@@ -37,8 +37,7 @@ TEST_CASES = [
     {"num_tokens": 2432},
 ]
 
-BASELINE_GEOMEAN_MS = 14.23
-SOL_GEOMEAN_MS      = 1.80
+SOL_GEOMEAN_MS = 1.80
 
 
 def _case_label(tc: dict) -> str:
@@ -100,9 +99,7 @@ def format_results_markdown(res: dict, mode: str = "leaderboard") -> str:
                   f"Geometric mean: ⏱ {geomean} ms", ""]
         if score:
             lines.append(f"Score: {score}")
-            lines.append(
-                f"(baseline ≈ {BASELINE_GEOMEAN_MS} ms, SOL ≈ {SOL_GEOMEAN_MS} ms)"
-            )
+            lines.append(f"(SOL ≈ {SOL_GEOMEAN_MS} ms)")
             lines.append("")
         for bd in res.get("benchmark_details", []):
             label = _case_label(bd)

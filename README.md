@@ -38,26 +38,26 @@ Fixed architecture: 256 experts, 8 experts/token, hidden_size=4096, moe_intermed
 
 **Benchmark cases (16 total) — from NVIDIA SOL-ExecBench:**
 
-| # | num_tokens | Baseline (ms) | SOL (ms) |
-|---|-----------|--------------|---------|
-| 1 | 2080 | 13.60 | 1.71 |
-| 2 | 2112 | 13.65 | 1.71 |
-| 3 | 4096 | 16.47 | 2.73 |
-| 4 | 2048 | 13.59 | 1.71 |
-| 5 | 2144 | 13.66 | 1.71 |
-| 6 | 2176 | 13.61 | 1.71 |
-| 7 | 2208 | 13.69 | 1.71 |
-| 8 | 2560 | 14.09 | 1.72 |
-| 9 | 6144 | 19.16 | 4.10 |
-| 10 | 2240 | 13.73 | 1.71 |
-| 11 | 2272 | 13.79 | 1.71 |
-| 12 | 2304 | 13.93 | 1.71 |
-| 13 | 2336 | 13.78 | 1.71 |
-| 14 | 2368 | 13.94 | 1.72 |
-| 15 | 2400 | 13.99 | 1.72 |
-| 16 | 2432 | 14.00 | 1.72 |
+| # | num_tokens | SOL (ms) |
+|---|-----------|---------|
+| 1 | 2080 | 1.71 |
+| 2 | 2112 | 1.71 |
+| 3 | 4096 | 2.73 |
+| 4 | 2048 | 1.71 |
+| 5 | 2144 | 1.71 |
+| 6 | 2176 | 1.71 |
+| 7 | 2208 | 1.71 |
+| 8 | 2560 | 1.72 |
+| 9 | 6144 | 4.10 |
+| 10 | 2240 | 1.71 |
+| 11 | 2272 | 1.71 |
+| 12 | 2304 | 1.71 |
+| 13 | 2336 | 1.71 |
+| 14 | 2368 | 1.72 |
+| 15 | 2400 | 1.72 |
+| 16 | 2432 | 1.72 |
 
-All 16 cases used for correctness testing and benchmarking. Correctness tolerance: `rtol=1e-2, atol=1e-2` (hidden/topk), `atol=1e-1` (weight grads). Score = `14.23 / geomean_ms` (≈1.0 at baseline, ≈7.9 at SOL).
+All 16 cases used for correctness testing and benchmarking. Correctness tolerance: `rtol=1e-2, atol=1e-2` (hidden/topk), `atol=1e-1` (weight grads). Score = `14.23 / geomean_ms` (≈7.9 at SOL).
 
 ## Setup
 

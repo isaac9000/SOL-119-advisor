@@ -35,8 +35,7 @@ CASES = [
 TEST_CASES      = CASES
 BENCHMARK_CASES = CASES
 
-# Scoring: score = SCORE_SCALE / geomean_ms (higher is better)
-# Baseline geomean ≈ 14.23 ms → score ≈ 1.0 at baseline; SOL ≈ 1.80 ms → score ≈ 7.9
+# Scoring: score = SCORE_SCALE / geomean_ms (higher is better); SOL ≈ 1.80 ms → score ≈ 7.9
 SCORE_SCALE = 14.23
 
 HIDDEN_SIZE           = 4096
@@ -46,7 +45,7 @@ NUM_EXPERTS_PER_TOK   = 8
 
 BENCH_USE_CUDA_EVENTS = True
 BENCH_REL_ERROR       = 0.001      # stop when stderr/mean < 0.1%
-BENCH_WALL_TIMEOUT_NS = 120e9
+BENCH_WALL_TIMEOUT_NS = 30e9       # 30s per case (was 120s; 120s×16=1920s exceeded timeout)
 BENCH_NO_GRAD         = True
 BENCH_MAX_REPEATS     = 100
 BENCH_MAX_TIME_NS     = 10e9
@@ -145,41 +144,44 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
     # ── Input generation ─────────────────────────────────────────────────────
 
     def generate_input(num_tokens, seed):
-        g = torch.Generator(device="cpu")
+        # Generate everything on GPU to avoid CPU RNG + PCIe transfer overhead.
+        # Weights are ~8.6 GB each; token tensors are small but also moved to GPU
+        # to eliminate the CPU argsort on (num_tokens, 256) which serialises on CPU.
+        g = torch.Generator(device="cuda")
         g.manual_seed(seed)
 
         hidden_states = torch.randn(
-            num_tokens, HIDDEN_SIZE, generator=g, dtype=torch.float32
-        ).cuda()
-
+            num_tokens, HIDDEN_SIZE, generator=g, dtype=torch.float32, device="cuda"
+        )
         grad_output = torch.randn(
-            num_tokens, HIDDEN_SIZE, generator=g, dtype=torch.float32
-        ).cuda()
+            num_tokens, HIDDEN_SIZE, generator=g, dtype=torch.float32, device="cuda"
+        )
 
-        # Each token selects NUM_EXPERTS_PER_TOK unique experts from N_ROUTED_EXPERTS
-        rand_scores  = torch.rand(num_tokens, N_ROUTED_EXPERTS, generator=g)
-        topk_indices = rand_scores.argsort(dim=-1)[:, :NUM_EXPERTS_PER_TOK].cuda()
+        # Each token selects NUM_EXPERTS_PER_TOK unique experts — argsort on GPU.
+        rand_scores  = torch.rand(num_tokens, N_ROUTED_EXPERTS, generator=g, device="cuda")
+        topk_indices = rand_scores.argsort(dim=-1)[:, :NUM_EXPERTS_PER_TOK]
 
         topk_weights_raw = torch.randn(
-            num_tokens, NUM_EXPERTS_PER_TOK, generator=g, dtype=torch.float32
+            num_tokens, NUM_EXPERTS_PER_TOK, generator=g, dtype=torch.float32, device="cuda"
         )
-        topk_weights = F.softmax(topk_weights_raw.cuda(), dim=-1)
+        topk_weights = F.softmax(topk_weights_raw, dim=-1)
 
         gate_weights = torch.randn(
             N_ROUTED_EXPERTS, MOE_INTERMEDIATE_SIZE, HIDDEN_SIZE,
-            generator=g, dtype=torch.float32
-        ).cuda() * 0.02
+            generator=g, dtype=torch.float32, device="cuda"
+        ) * 0.02
 
         up_weights = torch.randn(
             N_ROUTED_EXPERTS, MOE_INTERMEDIATE_SIZE, HIDDEN_SIZE,
-            generator=g, dtype=torch.float32
-        ).cuda() * 0.02
+            generator=g, dtype=torch.float32, device="cuda"
+        ) * 0.02
 
         down_weights = torch.randn(
             N_ROUTED_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE,
-            generator=g, dtype=torch.float32
-        ).cuda() * 0.02
+            generator=g, dtype=torch.float32, device="cuda"
+        ) * 0.02
 
+        torch.cuda.synchronize()
         return (grad_output, hidden_states, topk_indices, topk_weights,
                 gate_weights, up_weights, down_weights)
 
@@ -258,10 +260,16 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
         dummy.fill_(42)
         del dummy
 
+    # ── Timing ───────────────────────────────────────────────────────────────
+    _t0 = time.time()
+    def _log(msg):
+        print(f"[{time.time() - _t0:6.1f}s] {msg}", flush=True)
+
     # ── Load submission ───────────────────────────────────────────────────────
 
     gpu_name  = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"
     torch_ver = torch.__version__
+    _log(f"GPU: {gpu_name}  torch: {torch_ver}")
 
     tmp_dir  = tempfile.mkdtemp(prefix="submission_")
     tmp_path = _os.path.join(tmp_dir, "submission.py")
@@ -288,6 +296,7 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
 
     # ── Correctness tests ─────────────────────────────────────────────────────
 
+    _log("starting correctness tests")
     test_details = []
     tests_passed = 0
 
@@ -349,6 +358,8 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
             "platform": "modal-b200",
         })
 
+    _log(f"correctness passed {tests_passed}/{len(TEST_CASES)}")
+
     # ── Benchmarks ────────────────────────────────────────────────────────────
 
     ctx = torch.no_grad() if BENCH_NO_GRAD else contextlib.nullcontext()
@@ -356,6 +367,7 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
     bench_means_ns    = []
 
     for bench_args in BENCHMARK_CASES:
+        _log(f"benchmark num_tokens={bench_args['num_tokens']}")
         data = generate_input(**bench_args)
 
         # Warmup
@@ -400,6 +412,7 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
         st      = _stats(durations_ns)
         mean_ms = st["mean"] / 1e6
         err_ms  = st["err"]  / 1e6
+        _log(f"  → {mean_ms:.3f} ms  ({st['runs']} reps)")
         benchmark_details.append({
             "num_tokens": bench_args["num_tokens"],
             "seed":       bench_args["seed"],
@@ -414,6 +427,7 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
     geomean_ms  = geomean_s * 1e3
     score       = SCORE_SCALE / geomean_ms
 
+    _log(f"done  geomean={geomean_ms:.3f} ms  score={score:.3f}")
     return _json.dumps({
         "success": True,
         "tests_passed": tests_passed,
@@ -428,3 +442,18 @@ def evaluate_kernel(kernel_code: str, mode: str = "leaderboard") -> str:
         "torch_version": torch_ver,
         "platform":    "modal-b200",
     })
+
+
+@app.local_entrypoint()
+def run_baseline():
+    """Quick test: modal run eval_modal_moe_bwd.py"""
+    import json, os
+    baseline = os.path.join(os.path.dirname(__file__), "moe_bwd", "starting_point.py")
+    with open(baseline) as f:
+        code = f.read()
+    print("Submitting baseline to B200...")
+    raw = evaluate_kernel.remote(code, mode="leaderboard")
+    data = json.loads(raw)
+    bm = data.get("benchmark", {})
+    print(f"passed={data['tests_passed']}/{data['tests_total']}  "
+          f"geomean={bm.get('geomean_ms','?')} ms  score={bm.get('score','?')}")
