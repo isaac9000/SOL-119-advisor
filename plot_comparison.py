@@ -15,8 +15,14 @@ with open(ADV_TSV) as f:
     reader = csv.DictReader(f, delimiter="\t")
     for row in reader:
         adv_iters.append(int(row["agent_iteration"]))
-        adv_times.append(float(row["time_us"]))   # stored in ms despite column name
-        adv_kinds.append(row["status"])
+        t = float(row["time_us"])
+        adv_times.append(t)
+        # iter 22 (18.51 ms) and iter 25 (18.56 ms) are cuBLAS warmup artifacts —
+        # the same code ran at 85.55 ms cold; treat them as discards for honest plotting
+        kind = row["status"]
+        if kind == "keep" and t < 50.0:
+            kind = "discard"
+        adv_kinds.append(kind)
 
 # ── EvoX data (parsed from evox log) ─────────────────────────────────────────
 # Iterations with valid geomean_ms; crashes logged as 0.0
